@@ -1,0 +1,86 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation CI/CD Demo
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+  VPCCidrBlock:
+    Type: String
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+  InstanceType:
+    Type: String
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: General Configuration
+        Parameters:
+          - Stage
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VPCCidrBlock
+      - Label:
+          default: Compute Configuration
+        Parameters:
+          - KeyName
+          - InstanceType
+    ParameterLabels:
+      Stage:
+        default: Stage
+      VPCCidrBlock:
+        default: VPC Cidr Block
+      KeyName:
+        default: Key Name
+      InstanceType:
+        default: Instance Type
+
+Resources:
+  IAM:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: src/iam.yml
+
+  NW:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: src/network.yml
+      Parameters:
+        Stage: !Ref Stage
+        VPCCidrBlock: !Ref VPCCidrBlock
+
+  Custom:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: src/custom.yml
+      Parameters:
+        LambdaAMIInfoRoleArn: !GetAtt IAM.Outputs.LambdaAMIInfoRoleArn
+
+  SG:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: src/security_group.yml
+      Parameters:
+        Stage: !Ref Stage
+        VpcId: !GetAtt NW.Outputs.VpcId
+
+  Compute:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: src/compute.yml
+      Parameters:
+        Stage: !Ref Stage
+        SGId: !GetAtt SG.Outputs.SGId
+        SubnetId: !GetAtt NW.Outputs.SubnetId
+        InstanceProfile: !GetAtt IAM.Outputs.InstanceProfile
+        ImageId: !GetAtt Custom.Outputs.ImageId
+        KeyName: !Ref KeyName
+        InstanceType: !Ref InstanceType
+
+Outputs:
+  PublicIp:
+    Value: !GetAtt Compute.Outputs.PublicIp

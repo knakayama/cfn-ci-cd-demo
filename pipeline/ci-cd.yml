@@ -1,0 +1,359 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation CI/CD Pipeline
+
+Parameters:
+  Owner:
+    Type: String
+    Default: knakayama
+  Repo:
+    Type: String
+    Default: cfn-ci-cd-demo
+  Email:
+    Type: String
+  AppName:
+    Type: String
+    Default: cfn-ci-cd-demo
+  StackConfigDev:
+    Type: String
+    Default: param.dev.json
+  StackConfigProd:
+    Type: String
+    Default: param.prod.json
+  TemplateFilePath:
+    Type: String
+    Default: packaged.yml
+  OAuthToken:
+    Type: String
+    NoEcho: true
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: GitHub Configuration
+        Parameters:
+          - Owner
+          - Repo
+          - OAuthToken
+      - Label:
+          default: CodePipeline Configuration
+        Parameters:
+          - Email
+          - AppName
+          - StackConfigDev
+          - StackConfigProd
+          - TemplateFilePath
+    ParameterLabels:
+      Owner:
+        default: Owner
+      Repo:
+        default: Repository
+      Email:
+        default: Email
+      AppName:
+        default: App Name
+      StackConfigDev:
+        default: Stack Configuration for dev
+      StackConfigProd:
+        default: Stack Configuration for Prod
+      TemplateFilePath:
+        default: Template File Path
+      OAuthToken:
+        default: OAuth Token
+
+Resources:
+  ArtifactStoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+  CodeBuildBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+
+  CodePipelineSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Ref Email
+          Protocol: email
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: CloudWatchLogsAccess
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*
+              - Sid: S3Access
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub arn:aws:s3:::${ArtifactStoreBucket}
+                  - !Sub arn:aws:s3:::${ArtifactStoreBucket}/*
+                  - !Sub arn:aws:s3:::${CodeBuildBucket}
+                  - !Sub arn:aws:s3:::${CodeBuildBucket}/*
+              - Sid: CloudFormationAccess
+                Effect: Allow
+                Action: cloudformation:ValidateTemplate
+                Resource: "*"
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AppName}
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+        EnvironmentVariables:
+          - Name: AWS_REGION
+            Value: !Ref AWS::Region
+          - Name: S3_BUCKET
+            Value: !Ref CodeBuildBucket
+      Source:
+        Type: CODEPIPELINE
+
+  CFnRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: cloudformation.amazonaws.com
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: CodePipelineAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: S3FullAccess
+                Effect: Allow
+                Action: s3:*
+                Resource:
+                  - !Sub arn:aws:s3:::${ArtifactStoreBucket}
+                  - !Sub arn:aws:s3:::${ArtifactStoreBucket}/*
+              - Sid: FullAccess
+                Effect: Allow
+                Action:
+                  - cloudformation:*
+                  - iam:PassRole
+                Resource: "*"
+              - Sid: SNSPublishAccess
+                Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref CodePipelineSNSTopic
+              - Sid: CodeBuildAccess
+                Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: !GetAtt CodeBuildProject.Arn
+  PipelineDev:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${AppName}-dev
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactStoreBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: download-source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              Configuration:
+                Owner: !Ref Owner
+                Repo: !Ref Repo
+                Branch: develop
+                OAuthToken: !Ref OAuthToken
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Test
+          Actions:
+            - InputArtifacts:
+                - Name: SourceOutput
+              Name: testing
+              ActionTypeId:
+                Category: Test
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: TestOutput
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+        - Name: Build
+          Actions:
+            - InputArtifacts:
+                - Name: TestOutput
+              Name: create-changeset
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              OutputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: changeset
+                RoleArn: !GetAtt CFnRole.Arn
+                Capabilities: CAPABILITY_IAM
+                StackName: !Sub ${AppName}-dev
+                TemplatePath: !Sub TestOutput::${TemplateFilePath}
+                TemplateConfiguration: !Sub TestOutput::${StackConfigDev}
+        - Name: Approval
+          Actions:
+            - Name: approve-changeset
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: 1
+                Provider: Manual
+              Configuration:
+                NotificationArn: !Ref CodePipelineSNSTopic
+                ExternalEntityLink: !Sub https://console.aws.amazon.com/cloudformation/home?region=${AWS::Region}
+                CustomData: Please review changeset
+        - Name: Deploy
+          Actions:
+            - Name: execute-changeset
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                StackName: !Sub ${AppName}-dev
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName: changeset
+                RoleArn: !GetAtt CFnRole.Arn
+
+  PipelineProd:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${AppName}-prod
+      RoleArn: !GetAtt PipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactStoreBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: download-source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              Configuration:
+                Owner: !Ref Owner
+                Repo: !Ref Repo
+                Branch: master
+                OAuthToken: !Ref OAuthToken
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Test
+          Actions:
+            - InputArtifacts:
+                - Name: SourceOutput
+              Name: testing
+              ActionTypeId:
+                Category: Test
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: TestOutput
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+        - Name: Build
+          Actions:
+            - InputArtifacts:
+                - Name: TestOutput
+              Name: create-changeset
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              OutputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: changeset
+                RoleArn: !GetAtt CFnRole.Arn
+                Capabilities: CAPABILITY_IAM
+                StackName: !Sub ${AppName}-prod
+                TemplateConfiguration: !Sub TestOutput::${StackConfigProd}
+                TemplatePath: !Sub TestOutput::${TemplateFilePath}
+        - Name: Approval
+          Actions:
+            - Name: approve-changeset
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: 1
+                Provider: Manual
+              Configuration:
+                NotificationArn: !Ref CodePipelineSNSTopic
+                ExternalEntityLink: !Sub https://console.aws.amazon.com/cloudformation/home?region=${AWS::Region}
+                CustomData: Please review changeset
+        - Name: Deploy
+          Actions:
+            - Name: execute-changeset
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                StackName: !Sub ${AppName}-prod
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName: changeset
+                RoleArn: !GetAtt CFnRole.Arn

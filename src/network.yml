@@ -1,0 +1,86 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+Description: NW Stack
+
+Parameters:
+  Stage:
+    Type: String
+  VPCCidrBlock:
+    Type: String
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: General Configuration
+        Parameters:
+          - Stage
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VPCCidrBlock
+    ParameterLabels:
+      Stage:
+        default: Stage
+      VPCCidrBlock:
+        default: VPC Cidr Block
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VPCCidrBlock
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Stage}-vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${Stage}-igw
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    DependsOn: AttachGateway
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Stage}-rtb
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    DependsOn: AttachGateway
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref AWS::Region
+      CidrBlock: !Join [ "", [ !Select [ 0, !Split [ "/", !Ref VPCCidrBlock ] ], /24 ] ]
+      Tags:
+        - Key: Name
+          Value: !Sub ${Stage}-subnet
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+  SubnetId:
+    Value: !Ref PublicSubnet
